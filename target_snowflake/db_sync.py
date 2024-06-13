@@ -14,6 +14,9 @@ from target_snowflake.exceptions import TooManyRecordsException, PrimaryKeyNotFo
 from target_snowflake.upload_clients.s3_upload_client import S3UploadClient
 from target_snowflake.upload_clients.snowflake_upload_client import SnowflakeUploadClient
 
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization
+
 
 def validate_config(config):
     """Validate configuration"""
@@ -22,7 +25,6 @@ def validate_config(config):
         'account',
         'dbname',
         'user',
-        'password',
         'warehouse',
         's3_bucket',
         'stage',
@@ -33,7 +35,6 @@ def validate_config(config):
         'account',
         'dbname',
         'user',
-        'password',
         'warehouse',
         'file_format'
     ]
@@ -55,6 +56,14 @@ def validate_config(config):
     for k in required_config_keys:
         if not config.get(k, None):
             errors.append(f"Required key is missing from config: [{k}]")
+
+    possible_authentication_keys =  [
+      'password',
+      'private_key_path'
+    ]
+    if not any(config.get(k, None) for k in possible_authentication_keys):
+        errors.append(
+            f'Required authentication key missing. Existing methods: {",".join(possible_authentication_keys)}')
 
     # Check target schema config
     config_default_target_schema = config.get('default_target_schema', None)
@@ -285,6 +294,28 @@ class DbSync:
         else:
             self.upload_client = SnowflakeUploadClient(connection_config, self)
 
+    def get_private_key(self):
+        if self.connection_config.get('private_key_path'):
+            try:
+                encoded_passphrase = self.connection_config['private_key_passphrase'].encode()
+            except KeyError:
+                encoded_passphrase = None
+
+            with open(self.connection_config['private_key_path'], 'rb') as key:
+                p_key= serialization.load_pem_private_key(
+                        key.read(),
+                        password=encoded_passphrase,
+                        backend=default_backend()
+                    )
+
+            pkb = p_key.private_bytes(
+                    encoding=serialization.Encoding.DER,
+                    format=serialization.PrivateFormat.PKCS8,
+                    encryption_algorithm=serialization.NoEncryption())
+            return pkb
+
+        return None
+
     def open_connection(self):
         """Open snowflake connection"""
         stream = None
@@ -293,7 +324,8 @@ class DbSync:
 
         return snowflake.connector.connect(
             user=self.connection_config['user'],
-            password=self.connection_config['password'],
+            password=self.connection_config.get('password', None),
+            private_key=self.get_private_key(),
             account=self.connection_config['account'],
             database=self.connection_config['dbname'],
             warehouse=self.connection_config['warehouse'],
